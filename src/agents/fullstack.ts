@@ -1,4 +1,15 @@
 import type { AgentDefinition } from "../harness/loop.js";
+import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+/** Load deployment doctrine distilled from the FullStackDeploymentHandbook course. */
+function loadDoctrine(): string {
+  const p = join(here, "../../docs/deployment-doctrine.md");
+  return existsSync(p) ? readFileSync(p, "utf8") : "";
+}
 
 export const FULLSTACK_SYSTEM_PROMPT = `You are Forge, a production full-stack coding agent.
 
@@ -22,12 +33,17 @@ export const FULLSTACK_SYSTEM_PROMPT = `You are Forge, a production full-stack c
 - nginx: reverse proxy to the app port, deny dotfiles (.env/.git), security headers (nosniff, DENY frame, strict referrer), TLS via certbot --nginx after DNS resolves.
 - supervisor: autostart+autorestart the app process; logs to /var/log/supervisor/.
 - Server hardening baseline: non-root sudo user, UFW (allow 22/80/443), fail2ban, disabled password SSH auth.
+
+## Companion knowledge
+- The deployment doctrine (failure modes, red flags, ordered checklist) is in your context below — apply it whenever deployment work comes up.
+- When the user asks "what do I do next?" in a deployment, read docs/deployment-roadmap.md (in the Forge repo) for the stage-by-stage companion: signals to locate their stage, exact commands, and the next step.
 `;
 
 export function fullstackAgent(contextDocs: string[] = []): AgentDefinition {
   return {
     name: "forge-fullstack",
     systemPrompt: FULLSTACK_SYSTEM_PROMPT,
-    contextDocs,
+    // Doctrine is always present; roadmap available on demand via read_file.
+    contextDocs: [loadDoctrine(), ...contextDocs].filter(Boolean),
   };
 }
