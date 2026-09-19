@@ -17,14 +17,19 @@ src/
 │   ├── context.ts    Progressive summarization — long sessions never blow the context window
 │   ├── policy.ts     Safe/dangerous tool gates + shell red-flag hard-blocks
 │   ├── bus.ts        Event bus: harness ↔ CLI/WebSocket UI, approval suspend/resume
-│   └── llm.ts        OpenAI-compatible provider — any backend, model is config
+│   ├── llm.ts        OpenAI-compatible provider — any backend, model is config
+│   ├── providers.ts  Multi-provider registry: env-configured aliases, runtime-resolvable
+│   └── stats.ts      Per-session metrics: tool calls, approvals, errors, compaction
 ├── tools/            Schema-validated tools (fs, shell, git, deploy)
 ├── agents/           Agent definitions (system prompt + toolset + context docs)
+├── skills/           Bundled SKILL.md files (deployment doctrine + roadmap)
 ├── infrastructure/   DeployTarget interface + VPS (SSH) + Akash (SDL) adapters
-└── server/           Hono HTTP + WebSocket API for remote sessions and approvals
+└── server/           Hono HTTP + WebSocket API + htmx UI (chat, tool cards, eval dashboard)
+    └── views/         Tiny HTML template functions (escape, layout, messages, stats, eval)
 
 evals/                Golden tasks + tool-call scorers (regression suite for the agent)
 deploy/               Server bootstrap playbook (nginx, certbot, ufw, supervisor, fail2ban)
+public/               Static assets served by the server (htmx.min.js, styles.css)
 ```
 
 ## Quick start
@@ -45,6 +50,11 @@ npm run agent -- --session <session-id>
 # HTTP + WebSocket server (remote sessions, approvals from a UI)
 npm run dev
 ```
+
+Open `http://127.0.0.1:8787/` for the demo UI — chat, tool cards, approve/deny
+buttons, live SSE event stream, sessions sidebar, skills panel, eval dashboard.
+See `docs/deployment-doctrine.md` (archived) for the deployment knowledge that's
+loaded into the agent; the canonical version lives at `src/skills/deployment/SKILL.md`.
 
 ## Model policy
 
