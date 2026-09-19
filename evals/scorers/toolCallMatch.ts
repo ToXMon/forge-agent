@@ -45,6 +45,12 @@ export interface EvalScore {
   failures: string[];
   toolCallCount: number;
   eventCount: number;
+  /** Approval rate across the session: approved / requested. null if no approvals. */
+  approvalRate: number | null;
+  /** Fraction of tool calls that are retries of an earlier identical (name+args) call. */
+  retryRate: number;
+  /** Wall-clock duration of the task in ms, measured by the runner. */
+  durationMs: number;
 }
 
 /**
@@ -142,11 +148,33 @@ export function scoreToolCallMatch(task: GoldenTask, events: HarnessEvent[]): Ev
     failures.push(`event budget exceeded: ${events.length} > ${task.maxEvents}`);
   }
 
+  // Approval rate (null when no approval requests — don't divide by zero).
+  const requested = events.filter((e) => e.type === "approval_requested").length;
+  const approved = events.filter(
+    (e) => e.type === "approval_decided" && (e as Extract<HarnessEvent, { type: "approval_decided" }>).approved,
+  ).length;
+  const approvalRate = requested > 0 ? approved / requested : null;
+
+  // Retry rate: identical (name+args) tool calls after the first are retries.
+  let retries = 0;
+  if (calls.length > 0) {
+    const seen = new Set<string>();
+    for (const c of calls) {
+      const key = `${c.name}:${JSON.stringify(c.args)}`;
+      if (seen.has(key)) retries++;
+      else seen.add(key);
+    }
+  }
+  const retryRate = calls.length > 0 ? retries / calls.length : 0;
+
   return {
     taskId: task.id,
     pass: failures.length === 0,
     failures,
     toolCallCount: calls.length,
     eventCount: events.length,
+    approvalRate,
+    retryRate,
+    durationMs: 0, // overwritten by the runner (scorer is pure on events)
   };
 }

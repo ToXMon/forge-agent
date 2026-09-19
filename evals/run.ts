@@ -12,7 +12,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { providerFromEnv } from "../src/harness/llm.js";
+import { ProviderRegistry } from "../src/harness/providers.js";
 import { HarnessBus } from "../src/harness/bus.js";
 import { PolicyGuard } from "../src/harness/policy.js";
 import { AgentLoop } from "../src/harness/loop.js";
@@ -23,8 +23,9 @@ import { scoreToolCallMatch } from "./scorers/toolCallMatch.js";
 import { Checkpointer } from "../src/harness/checkpoint.js";
 
 async function main() {
-  const llm = providerFromEnv();
+  const llm = ProviderRegistry.fromEnv().defaultProvider();
   const results = [];
+  const runStartedAt = new Date().toISOString();
 
   // Optional filter: npm run eval -- --tasks id1,id2 (cheap re-runs)
   const flag = process.argv.indexOf("--tasks");
@@ -49,17 +50,47 @@ async function main() {
       }
     });
 
+    const t0 = Date.now();
     await loop.run(fullstackAgent(), task.prompt, { maxSteps: 15 });
+    const durationMs = Date.now() - t0;
     const events = new Checkpointer(workDir, loop.sessionId).events();
-    const score = scoreToolCallMatch(task, events);
+    const score = { ...scoreToolCallMatch(task, events), durationMs };
     results.push(score);
-    console.log(`${score.pass ? "PASS" : "FAIL"} ${score.taskId} (${score.toolCallCount} calls, ${score.eventCount} events)`);
+    console.log(
+      `${score.pass ? "PASS" : "FAIL"} ${score.taskId} (${score.toolCallCount} calls, ${score.eventCount} events, ${(durationMs / 1000).toFixed(1)}s)`,
+    );
     for (const f of score.failures) console.log(`     - ${f}`);
   }
 
   const passed = results.filter((r) => r.pass).length;
-  console.log(`\n${passed}/${results.length} tasks passed`);
-  process.exit(passed === results.length ? 0 : 1);
+  console.log(`\n${passed}/${tasks.length} tasks passed`);
+  writeResultsJson({
+    ranAt: runStartedAt,
+    finishedAt: new Date().toISOString(),
+    model: llm.model,
+    totalTasks: tasks.length,
+    passed,
+    results,
+  });
+  process.exit(passed === tasks.length ? 0 : 1);
+}
+
+interface EvalRunResult {
+  ranAt: string;
+  finishedAt: string;
+  model: string;
+  totalTasks: number;
+  passed: number;
+  results: ReturnType<typeof scoreToolCallMatch>[];
+}
+
+/**
+ * Persist the last eval run so the htmx UI eval dashboard (commit 3) can
+ * render without re-running. Gitignored — see .gitignore `evals/.last-results.json`.
+ */
+function writeResultsJson(payload: EvalRunResult): void {
+  const p = join(import.meta.dirname ?? dirname(new URL(import.meta.url).pathname), ".last-results.json");
+  writeFileSync(p, JSON.stringify(payload, null, 2), "utf8");
 }
 
 /** Seed a task's fixture files and optional git state into the scratch dir. */
