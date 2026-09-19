@@ -1,14 +1,14 @@
 import type { AgentDefinition } from "../harness/loop.js";
-import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { loadSkills, formatSkillsForContext } from "../skills/loader.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** Load deployment doctrine distilled from the FullStackDeploymentHandbook course. */
-function loadDoctrine(): string {
-  const p = join(here, "../../docs/deployment-doctrine.md");
-  return existsSync(p) ? readFileSync(p, "utf8") : "";
+/** Load all bundled skills as one context-injectable doc. */
+function loadBundledSkills(): string {
+  const root = join(here, "../skills");
+  return formatSkillsForContext(loadSkills(root));
 }
 
 export const FULLSTACK_SYSTEM_PROMPT = `You are Forge, a production full-stack coding agent.
@@ -35,15 +35,14 @@ export const FULLSTACK_SYSTEM_PROMPT = `You are Forge, a production full-stack c
 - Server hardening baseline: non-root sudo user, UFW (allow 22/80/443), fail2ban, disabled password SSH auth.
 
 ## Companion knowledge
-- The deployment doctrine (failure modes, red flags, ordered checklist) is in your context below — apply it whenever deployment work comes up.
-- When the user asks "what do I do next?" in a deployment, read docs/deployment-roadmap.md (in the Forge repo) for the stage-by-stage companion: signals to locate their stage, exact commands, and the next step.
+- Skills are injected into your context below (body + any companions). Apply the relevant one whenever the matching work comes up — no need to read additional files unless the user asks for something outside the loaded skills.
 `;
 
 export function fullstackAgent(contextDocs: string[] = []): AgentDefinition {
   return {
     name: "forge-fullstack",
     systemPrompt: FULLSTACK_SYSTEM_PROMPT,
-    // Doctrine is always present; roadmap available on demand via read_file.
-    contextDocs: [loadDoctrine(), ...contextDocs].filter(Boolean),
+    // Bundled skills (body + companions) are always present.
+    contextDocs: [loadBundledSkills(), ...contextDocs].filter(Boolean),
   };
 }
