@@ -134,11 +134,14 @@ export class AgentLoop {
         const decision = this.deps.policy.check(call);
 
         if (decision.requiresApproval && !opts.autoApprove) {
+          // Register the waiter BEFORE emitting — a fast responder (eval harness,
+          // auto-deny) can answer synchronously during emit and must not be missed.
+          const verdictPromise = this.deps.bus.awaitApproval(this.sessionId, call.id);
           this.emit({ type: "approval_requested", call, reason: decision.reason });
           state = { ...state, status: "awaiting_approval", pendingApproval: call };
           this.saveState(state);
 
-          const verdict = await this.deps.bus.awaitApproval(this.sessionId, call.id);
+          const verdict = await verdictPromise;
           this.emit({ type: "approval_decided", callId: call.id, approved: verdict.approved, note: verdict.note });
           if (!verdict.approved) {
             this.emit({
@@ -182,6 +185,7 @@ export class AgentLoop {
       this.saveState(next);
       return next;
     }
+    // Register the waiter before any synchronous responder can fire.
     const verdict = await this.deps.bus.awaitApproval(this.sessionId, call.id);
     this.emit({ type: "approval_decided", callId: call.id, approved: verdict.approved, note: verdict.note });
     if (verdict.approved) {
