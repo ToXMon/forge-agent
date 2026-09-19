@@ -79,6 +79,10 @@ export class OpenAICompatibleProvider implements LLMProvider {
   }
 
   async summarize(messages: Message[]): Promise<string> {
+    // Serialize as a plain-text transcript in a single user message — avoids
+    // provider-specific shape rules (tool messages need tool_call_id, etc.)
+    // that strict backends like Venice reject with 400.
+    const transcript = serializeTranscript(messages);
     const res = await this.client.chat.completions.create({
       model: this.model,
       temperature: 0,
@@ -88,11 +92,30 @@ export class OpenAICompatibleProvider implements LLMProvider {
           content:
             "Summarize this agent conversation into a compact state brief: goal, decisions made, files touched, pending work, and any errors encountered. Preserve exact paths, commands, and identifiers. Max 400 words.",
         },
-        ...(messages.map((m) => ({ role: m.role, content: m.content })) as OpenAI.ChatCompletionMessageParam[]),
+        { role: "user", content: transcript },
       ],
     });
     return res.choices[0].message.content ?? "";
   }
+}
+
+/**
+ * Render an agent conversation as a single plain-text transcript. Exported
+ * so the message-shape fix (Venice 400 rejection of multi-role inputs) can
+ * be unit-tested without HTTP mocks. Capped at 60k chars to defend the
+ * summarization prompt window.
+ */
+export function serializeTranscript(messages: Message[]): string {
+  return messages
+    .map((m) => {
+      const who = m.role === "tool" ? `tool(${m.toolCallId ?? "result"})` : m.role;
+      const calls = m.toolCalls?.length
+        ? ` [called: ${m.toolCalls.map((t) => `${t.name}(${JSON.stringify(t.args).slice(0, 120)})`).join(", ")}]`
+        : "";
+      return `[${who}]${calls} ${m.content}`;
+    })
+    .join("\n\n")
+    .slice(0, 60_000);
 }
 
 function safeParseArgs(raw: string): Record<string, unknown> {

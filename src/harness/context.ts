@@ -41,7 +41,19 @@ export class ContextHydrator {
     if (state.summary) {
       oldMessages.unshift({ role: "system", content: `Prior summary:\n${state.summary}` });
     }
-    const summary = await this.llm.summarize(oldMessages);
+    let summary: string;
+    try {
+      summary = await this.llm.summarize(oldMessages);
+    } catch (err) {
+      // Compaction is an optimization — a failed summarization must never
+      // kill the loop. Skip this round; the next step will retry.
+      this.store.append({
+        type: "error",
+        message: `summarization failed, skipping compaction: ${err instanceof Error ? err.message : String(err)}`,
+        recoverable: true,
+      });
+      return state;
+    }
     this.store.append({ type: "summary_compacted", summary, upToEvent: cut });
 
     const next: AgentState = {
