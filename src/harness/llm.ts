@@ -8,11 +8,21 @@ export interface LLMToolSpec {
   parameters: Record<string, unknown>;
 }
 
+export interface LLMUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** Provider-reported cost in USD when available (OpenRouter includes this). */
+  costUsd: number | null;
+}
+
 export interface LLMResponse {
   content: string;
   toolCalls: ToolCall[];
   /** True when the model signaled it is finished (no tool calls, final text). */
   finishReason: string;
+  /** Token usage reported by the provider, when present. */
+  usage: LLMUsage | null;
 }
 
 export interface LLMProvider {
@@ -75,6 +85,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       content: choice.message.content ?? "",
       toolCalls,
       finishReason: choice.finish_reason,
+      usage: extractUsage(res.usage),
     };
   }
 
@@ -95,8 +106,24 @@ export class OpenAICompatibleProvider implements LLMProvider {
         { role: "user", content: transcript },
       ],
     });
+    // Compaction usage is intentionally not returned — it's overhead, not
+    // part of the agent conversation's token accounting.
     return res.choices[0].message.content ?? "";
   }
+}
+
+/** Normalize OpenAI-compatible usage into our shape (cost only when reported). */
+function extractUsage(u: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number } | undefined): LLMUsage | null {
+  if (!u) return null;
+  const promptTokens = u.prompt_tokens ?? 0;
+  const completionTokens = u.completion_tokens ?? 0;
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: u.total_tokens ?? promptTokens + completionTokens,
+    // OpenRouter returns `cost` in USD on non-standard usage; others omit it.
+    costUsd: typeof (u as { cost?: unknown }).cost === "number" ? (u as { cost: number }).cost : null,
+  };
 }
 
 /**

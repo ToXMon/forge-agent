@@ -46,6 +46,15 @@ export const EventSchema = z.discriminatedUnion("type", [
     note: z.string().optional(),
   }),
   z.object({ type: z.literal("summary_compacted"), summary: z.string(), upToEvent: z.number() }),
+  z.object({
+    type: z.literal("llm_usage"),
+    model: z.string(),
+    promptTokens: z.number(),
+    completionTokens: z.number(),
+    totalTokens: z.number(),
+    /** Optional provider-reported cost in USD (e.g. OpenRouter). */
+    costUsd: z.number().nullable().optional(),
+  }),
   z.object({ type: z.literal("error"), message: z.string(), recoverable: z.boolean() }),
   z.object({ type: z.literal("done"), reason: z.string() }),
 ]);

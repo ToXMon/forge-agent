@@ -117,6 +117,19 @@ export class AgentLoop {
         return state;
       }
 
+      // Durable token accounting: one event per LLM call keeps the session's
+      // cost/usage auditable from the event log alone.
+      if (response.usage) {
+        this.emit({
+          type: "llm_usage",
+          model: this.deps.llm.model,
+          promptTokens: response.usage.promptTokens,
+          completionTokens: response.usage.completionTokens,
+          totalTokens: response.usage.totalTokens,
+          costUsd: response.usage.costUsd,
+        });
+      }
+
       this.emit({
         type: "assistant_message",
         message: { role: "assistant", content: response.content, toolCalls: response.toolCalls },

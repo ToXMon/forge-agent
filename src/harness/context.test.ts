@@ -6,7 +6,7 @@ import { ContextHydrator } from "./context.js";
 import { Checkpointer } from "./checkpoint.js";
 import type { LLMProvider, LLMResponse } from "./llm.js";
 
-const emptyResponse: LLMResponse = { content: "", toolCalls: [], finishReason: "stop" };
+const emptyResponse: LLMResponse = { content: "", toolCalls: [], finishReason: "stop", usage: null };
 
 const stubLLM = (over: Partial<LLMProvider> = {}): LLMProvider => ({
   model: "stub",

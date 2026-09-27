@@ -22,6 +22,17 @@ export interface SessionStats {
   approvals: { requested: number; approved: number; denied: number };
   /** Count of `error` events emitted. */
   errors: number;
+  /** Aggregate LLM token usage across all calls in the session. */
+  tokens: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    llmCalls: number;
+    /** Sum of provider-reported costs in USD (null when the provider doesn't report cost). */
+    costUsd: number | null;
+  };
+  /** LLM models used in this session, e.g. ["deepseek/deepseek-chat-v3-0324"]. */
+  models: string[];
   /** Length of the latest compacted summary in chars; null if no compaction yet. */
   compactedSummaryLen: number | null;
   /** Name of the tool currently awaiting approval, if any. */
@@ -46,6 +57,8 @@ export function summarizeSession(workDir: string, sessionId: string): SessionSta
   let approvalDenied = 0;
   let errors = 0;
   let lastSummary: string | null = null;
+  const tokens = { promptTokens: 0, completionTokens: 0, totalTokens: 0, llmCalls: 0, costUsd: null as number | null };
+  const models = new Set<string>();
 
   for (const ev of events) {
     if (ev.type === "tool_call") {
@@ -60,6 +73,13 @@ export function summarizeSession(workDir: string, sessionId: string): SessionSta
       errors++;
     } else if (ev.type === "summary_compacted") {
       lastSummary = ev.summary;
+    } else if (ev.type === "llm_usage") {
+      tokens.promptTokens += ev.promptTokens;
+      tokens.completionTokens += ev.completionTokens;
+      tokens.totalTokens += ev.totalTokens;
+      tokens.llmCalls++;
+      if (ev.costUsd != null) tokens.costUsd = (tokens.costUsd ?? 0) + ev.costUsd;
+      models.add(ev.model);
     }
   }
 
@@ -71,6 +91,8 @@ export function summarizeSession(workDir: string, sessionId: string): SessionSta
     byTool,
     approvals: { requested: approvalRequested, approved: approvalApproved, denied: approvalDenied },
     errors,
+    tokens,
+    models: [...models],
     compactedSummaryLen: lastSummary?.length ?? null,
     pendingApproval: state?.pendingApproval?.name ?? null,
     lastError: state?.lastError ?? null,
@@ -88,6 +110,12 @@ export function formatStats(s: SessionStats): string {
   const entries = Object.entries(s.byTool).sort((a, b) => b[1] - a[1]);
   if (entries.length) {
     lines.push(`tools: ${entries.map(([n, c]) => `${n}=${c}`).join(", ")}`);
+  }
+  const t = s.tokens;
+  if (t.llmCalls > 0) {
+    const cost = t.costUsd != null ? ` · $${t.costUsd.toFixed(4)}` : "";
+    lines.push(`tokens: ${t.totalTokens.toLocaleString()} (${t.promptTokens.toLocaleString()} in / ${t.completionTokens.toLocaleString()} out) over ${t.llmCalls} calls${cost}`);
+    if (s.models.length) lines.push(`models: ${s.models.join(", ")}`);
   }
   const a = s.approvals;
   if (a.requested > 0) {

@@ -43,6 +43,10 @@ export function eventFragment(
     case "summary_compacted":
       return `<div class="message system">compacted ${ev.upToEvent} events into a ${ev.summary.length}-char summary</div>`;
 
+    case "llm_usage":
+      // Silent in the chat view — usage is surfaced in the stats panel.
+      return "";
+
     case "error":
       return `<div class="message system">error: ${escapeHtml(ev.message)}</div>`;
 
