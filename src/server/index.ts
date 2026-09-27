@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createNodeWebSocket } from "@hono/node-ws";
@@ -14,6 +15,7 @@ import { codingToolRegistry } from "../tools/index.js";
 import { fullstackAgent } from "../agents/fullstack.js";
 import { Checkpointer } from "../harness/checkpoint.js";
 import { summarizeSession } from "../harness/stats.js";
+import { startTelegramChannel } from "../channels/telegram.js";
 import { loadSkills } from "../skills/loader.js";
 import { GOLDEN_TASKS } from "../../evals/golden/tasks.js";
 import { scoreToolCallMatch } from "../../evals/scorers/toolCallMatch.js";
@@ -32,6 +34,8 @@ const resultsPath = join(here, "../../evals/.last-results.json");
 const workDir = process.cwd();
 
 const app = new Hono();
+// Allow the Next.js UI (different origin in dev) to call the JSON/WS APIs.
+app.use("*", cors());
 const bus = new HarnessBus();
 const registry = ProviderRegistry.fromEnv();
 const llm = registry.defaultProvider();
@@ -53,6 +57,7 @@ app.use(
 // ── Health + existing JSON API (unchanged) ────────────────────────
 app.get("/health", (c) => c.json({ ok: true, model: llm.model, providers: registry.names() }));
 app.get("/sessions", (c) => c.json({ sessions: Checkpointer.listSessions(workDir) }));
+app.get("/sessions/:id/stats", (c) => c.json(summarizeSession(workDir, c.req.param("id"))));
 
 // ── HTML pages ────────────────────────────────────────────────────
 
@@ -79,14 +84,21 @@ app.get("/", (c) => {
 });
 
 app.post("/sessions", async (c) => {
-  const body = await c.req.parseBody();
-  const task = String(body.task ?? "").trim();
+  const wantsJson = (c.req.header("content-type") ?? "").includes("application/json");
+  let task: string;
+  if (wantsJson) {
+    task = String((await c.req.json<{ task?: string }>()).task ?? "").trim();
+  } else {
+    const body = await c.req.parseBody();
+    task = String(body.task ?? "").trim();
+  }
   if (!task) return c.text("task required", 400);
 
   const loop = new AgentLoop({ llm, tools, policy, bus, workDir });
   loop
     .run(fullstackAgent(), task, { autoApprove: false })
     .catch((err) => bus.publish(loop.sessionId, { type: "error", message: String(err), recoverable: false }));
+  if (wantsJson) return c.json({ sessionId: loop.sessionId }, 201);
   return c.redirect(`/sessions/${loop.sessionId}`, 303);
 });
 
@@ -171,8 +183,13 @@ app.get("/sessions/:id/events-stream", (c) => {
 
 app.post("/sessions/:id/messages", async (c) => {
   const id = c.req.param("id");
-  const body = await c.req.parseBody();
-  const message = String(body.message ?? "").trim();
+  let message: string;
+  if ((c.req.header("content-type") ?? "").includes("application/json")) {
+    message = String((await c.req.json<{ message?: string }>()).message ?? "").trim();
+  } else {
+    const body = await c.req.parseBody();
+    message = String(body.message ?? "").trim();
+  }
   if (!message) return c.text("message required", 400);
 
   // Resume the session from disk and run a new message.
@@ -312,3 +329,15 @@ const server = serve({ fetch: app.fetch, port }, (info) => {
   console.log(`  open the UI: http://127.0.0.1:${info.port}/`);
 });
 injectWebSocket(server);
+
+// Telegram channel: opt-in via FORGE_TELEGRAM_BOT_TOKEN (from @BotFather).
+if (process.env.FORGE_TELEGRAM_BOT_TOKEN) {
+  startTelegramChannel(process.env.FORGE_TELEGRAM_BOT_TOKEN, {
+    llm,
+    tools,
+    policy,
+    bus,
+    workDir,
+    agent: fullstackAgent,
+  });
+}
