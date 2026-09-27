@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { forge, streamSession, toolLabel, type HarnessEvent, type SessionStats, type ToolCall } from "@/lib/forge";
+import {
+  forge,
+  clearToken,
+  getToken,
+  setToken,
+  streamSession,
+  toolLabel,
+  type HarnessEvent,
+  type Me,
+  type SessionStats,
+  type ToolCall,
+} from "@/lib/forge";
 
 interface ChatItem {
   key: string;
@@ -42,6 +53,8 @@ function buildItems(events: HarnessEvent[]): ChatItem[] {
 }
 
 export default function Home() {
+  const [me, setMe] = useState<Me | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [sessions, setSessions] = useState<string[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [items, setItems] = useState<ChatItem[]>([]);
@@ -57,9 +70,22 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!getToken()) {
+      setAuthChecked(true);
+      return;
+    }
+    forge
+      .me()
+      .then(setMe)
+      .catch(() => clearToken())
+      .finally(() => setAuthChecked(true));
+  }, []);
+
+  useEffect(() => {
+    if (!me) return;
     forge.health().then((h) => setModel(h.model)).catch(() => setModel("backend offline"));
     refreshSessions();
-  }, [refreshSessions]);
+  }, [me, refreshSessions]);
 
   const refreshStats = useCallback((id: string) => {
     forge.sessionStats(id).then(setStats).catch(() => setStats(null));
@@ -129,6 +155,9 @@ export default function Home() {
     return `${t.totalTokens.toLocaleString()} tok · ${t.promptTokens.toLocaleString()} in / ${t.completionTokens.toLocaleString()} out${cost ? ` · ${cost}` : ""} · ${stats.toolCallCount} tools · ${stats.approvals.approved}/${stats.approvals.requested} approved`;
   }, [stats]);
 
+  if (!authChecked) return null;
+  if (!me) return <AuthPanel onAuth={setMe} />;
+
   return (
     <div className="flex h-dvh bg-zinc-950 text-zinc-100">
       {/* Sidebar */}
@@ -168,7 +197,24 @@ export default function Home() {
           <div className="text-sm text-zinc-400">
             {active ? <>session <span className="font-mono text-zinc-200">{active.slice(0, 8)}</span></> : "New session"}
           </div>
-          {statsInfo && <div className="hidden text-xs text-zinc-500 sm:block">{statsInfo}</div>}
+          <div className="flex items-center gap-4">
+            {statsInfo && <div className="hidden text-xs text-zinc-500 sm:block">{statsInfo}</div>}
+            <span className="hidden text-xs text-zinc-400 sm:block">
+              {me?.email}
+              {me?.creditsTokens != null && <span className="ml-1 text-orange-400">· {me.creditsTokens.toLocaleString()} cr</span>}
+            </span>
+            <button
+              onClick={() => {
+                void forge.logout();
+                clearToken();
+                setMe(null);
+                setActive(null);
+              }}
+              className="text-xs text-zinc-500 hover:text-zinc-300"
+            >
+              Log out
+            </button>
+          </div>
         </header>
 
         <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
@@ -304,6 +350,71 @@ function ChatRow({ item, onDecide }: { item: ChatItem; onDecide: (callId: string
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function AuthPanel({ onAuth }: { onAuth: (me: Me) => void }) {
+  const [mode, setMode] = useState<"login" | "signup">("signup");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (!email.trim() || !password || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = mode === "signup" ? await forge.signup(email, password) : await forge.login(email, password);
+      setToken(res.token);
+      onAuth(res.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex h-dvh items-center justify-center bg-zinc-950 text-zinc-100">
+      <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/60 p-8">
+        <h1 className="mb-1 text-lg font-semibold text-orange-400">⚒ FORGE</h1>
+        <p className="mb-6 text-xs text-zinc-500">
+          {mode === "signup"
+            ? "New accounts start with trial credits. The first account becomes the admin."
+            : "Sign in to your Forge account."}
+        </p>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+          className="mb-3 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm outline-none placeholder:text-zinc-600 focus:border-orange-500/60"
+        />
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void submit()}
+          placeholder="Password (8+ characters)"
+          className="mb-3 w-full rounded-xl border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm outline-none placeholder:text-zinc-600 focus:border-orange-500/60"
+        />
+        {error && <p className="mb-3 text-xs text-red-400">{error}</p>}
+        <button
+          onClick={() => void submit()}
+          disabled={busy}
+          className="w-full rounded-xl bg-orange-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-orange-400 disabled:opacity-40"
+        >
+          {busy ? "…" : mode === "signup" ? "Create account" : "Sign in"}
+        </button>
+        <button
+          onClick={() => setMode(mode === "signup" ? "login" : "signup")}
+          className="mt-4 w-full text-center text-xs text-zinc-500 hover:text-zinc-300"
+        >
+          {mode === "signup" ? "Already have an account? Sign in" : "No account? Sign up"}
+        </button>
+      </div>
     </div>
   );
 }

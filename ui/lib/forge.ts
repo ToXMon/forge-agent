@@ -5,6 +5,21 @@
  */
 export const FORGE_API = process.env.NEXT_PUBLIC_FORGE_API ?? "http://127.0.0.1:8787";
 
+// ── Auth token (localStorage; sent as bearer + ?token= for WS) ────
+const TOKEN_KEY = "forge_token";
+export const getToken = () => (typeof window === "undefined" ? null : localStorage.getItem(TOKEN_KEY));
+export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t);
+export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
+function authHeaders(): Record<string, string> {
+  const t = getToken();
+  return t ? { authorization: `Bearer ${t}` } : {};
+}
+export interface Me {
+  email: string;
+  admin: boolean;
+  creditsTokens: number | null;
+}
+
 export type ToolCall = { id: string; name: string; args: Record<string, unknown> };
 
 export type HarnessEvent =
@@ -36,13 +51,22 @@ export interface SessionStats {
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${FORGE_API}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
+    headers: { "content-type": "application/json", ...authHeaders(), ...init?.headers },
   });
+  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) throw new Error(`${init?.method ?? "GET"} ${path} → ${res.status}`);
   return (await res.json()) as T;
 }
 
+export class UnauthorizedError extends Error {}
+
 export const forge = {
+  signup: (email: string, password: string) =>
+    json<{ token: string; user: Me }>("/auth/signup", { method: "POST", body: JSON.stringify({ email, password }) }),
+  login: (email: string, password: string) =>
+    json<{ token: string; user: Me }>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => json<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+  me: () => json<Me>("/auth/me"),
   listSessions: () => json<{ sessions: string[] }>("/sessions").then((r) => r.sessions),
   sessionEvents: (id: string) =>
     json<{ events: HarnessEvent[]; state: { status: string } | null }>(`/sessions/${id}/events`),
@@ -53,7 +77,7 @@ export const forge = {
   sendMessage: (id: string, message: string) =>
     fetch(`${FORGE_API}/sessions/${id}/messages`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...authHeaders() },
       body: JSON.stringify({ message }),
     }),
   decide: (id: string, callId: string, approved: boolean) =>
@@ -72,7 +96,8 @@ export function streamSession(id: string, onEvent: (ev: HarnessEvent) => void): 
 
   const connect = () => {
     if (closed) return;
-    ws = new WebSocket(wsUrl);
+    const token = getToken();
+    ws = new WebSocket(token ? `${wsUrl}?token=${encodeURIComponent(token)}` : wsUrl);
     ws.onmessage = (m) => {
       try {
         onEvent(JSON.parse(m.data) as HarnessEvent);

@@ -22,6 +22,9 @@ services:
       - FORGE_API_KEY=sk-or-REPLACE-ME
       - FORGE_MODEL=deepseek/deepseek-chat-v3-0324
       - FORGE_PORT=8787
+      # Auth: set FORGE_SECRET (node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+      - FORGE_SECRET=REPLACE-ME-WITH-RANDOM-HEX
+      - FORGE_TRIAL_TOKENS=50000
       # - FORGE_TELEGRAM_BOT_TOKEN=123:abc   # only if you want the Telegram channel
     expose:
       - port: 8787

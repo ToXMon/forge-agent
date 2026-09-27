@@ -4,7 +4,7 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { streamSSE } from "hono/streaming";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ProviderRegistry } from "../harness/providers.js";
@@ -16,6 +16,8 @@ import { fullstackAgent } from "../agents/fullstack.js";
 import { Checkpointer } from "../harness/checkpoint.js";
 import { summarizeSession } from "../harness/stats.js";
 import { startTelegramChannel } from "../channels/telegram.js";
+import { AuthStore, AuthError, type User } from "../auth/auth.js";
+import { randomBytes } from "node:crypto";
 import { loadSkills } from "../skills/loader.js";
 import { GOLDEN_TASKS } from "../../evals/golden/tasks.js";
 import { scoreToolCallMatch } from "../../evals/scorers/toolCallMatch.js";
@@ -27,16 +29,88 @@ import { eventFragment, historicalEventsHtml } from "./views/messages.js";
 import { statsPanel } from "./views/stats.js";
 import { evalDashboard, evalGrid, evalHeader, type EvalResults } from "./views/eval.js";
 import type { EvalScore } from "../../evals/scorers/toolCallMatch.js";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { escapeHtml } from "./views/escape.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const resultsPath = join(here, "../../evals/.last-results.json");
 const workDir = process.cwd();
 
-const app = new Hono();
+const app = new Hono<{ Variables: { user: User } }>();
 // Allow the Next.js UI (different origin in dev) to call the JSON/WS APIs.
 app.use("*", cors());
 const bus = new HarnessBus();
+
+// ── Auth (first signup = admin with unlimited credits) ───────────
+/** Pepper for password hashing: env-provided, or generated once and persisted
+ *  so restarts don't invalidate existing passwords. */
+function loadOrCreateSecret(): string {
+  if (process.env.FORGE_SECRET) return process.env.FORGE_SECRET;
+  const secretPath = join(workDir, ".forge", "secret.key");
+  try {
+    return readFileSync(secretPath, "utf8").trim();
+  } catch {
+    const secret = randomBytes(32).toString("hex");
+    mkdirSync(join(workDir, ".forge"), { recursive: true });
+    writeFileSync(secretPath, secret);
+    return secret;
+  }
+}
+const auth = new AuthStore({
+  workDir,
+  trialTokens: Number(process.env.FORGE_TRIAL_TOKENS ?? 50_000),
+  secret: loadOrCreateSecret(),
+});
+const ownersPath = join(workDir, ".forge", "session-owners.json");
+function loadOwners(): Record<string, string> {
+  try {
+    return JSON.parse(readFileSync(ownersPath, "utf8")) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+function saveOwner(sessionId: string, email: string): void {
+  const owners = loadOwners();
+  owners[sessionId] = email;
+  mkdirSync(join(workDir, ".forge"), { recursive: true });
+  writeFileSync(ownersPath, JSON.stringify(owners, null, 2));
+}
+// Drain each session owner's credits as llm_usage events land.
+type GlobalEventPayload = { sessionId: string; event: { type: string; totalTokens?: number } };
+const creditHandler = ({ sessionId, event }: GlobalEventPayload) => {
+  if (event.type !== "llm_usage") return;
+  const owner = loadOwners()[sessionId];
+  if (owner && event.totalTokens) auth.deduct(owner, event.totalTokens);
+};
+bus.on("event", creditHandler);
+
+const PUBLIC_PATHS = [/^\/health$/, /^\/auth\/(signup|login)$/];
+app.use("*", async (c, next) => {
+  if (PUBLIC_PATHS.some((re) => re.test(c.req.path))) return next();
+  // Bearer header for REST; ?token= for the WebSocket (browsers can't set
+  // headers on WS connects).
+  const token = c.req.header("authorization")?.replace(/^Bearer\s+/i, "") ?? c.req.query("token");
+  const user = auth.resolveToken(token);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
+  c.set("user", user);
+  return next();
+});
+
+/** Non-admins may only touch sessions they own. Admins see everything. */
+function canAccess(user: User, sessionId: string): boolean {
+  if (user.admin) return true;
+  return loadOwners()[sessionId] === user.email;
+}
+function ownedSessions(user: User): string[] {
+  const all = Checkpointer.listSessions(workDir);
+  if (user.admin) return all;
+  const owners = loadOwners();
+  return all.filter((id) => owners[id] === user.email);
+}
+function requireCredits(user: User): { error: string } | null {
+  if (!auth.hasCredits(user.email)) return { error: "out of credits" };
+  return null;
+}
 const registry = ProviderRegistry.fromEnv();
 const llm = registry.defaultProvider();
 const tools = codingToolRegistry();
@@ -56,8 +130,44 @@ app.use(
 
 // ── Health + existing JSON API (unchanged) ────────────────────────
 app.get("/health", (c) => c.json({ ok: true, model: llm.model, providers: registry.names() }));
-app.get("/sessions", (c) => c.json({ sessions: Checkpointer.listSessions(workDir) }));
-app.get("/sessions/:id/stats", (c) => c.json(summarizeSession(workDir, c.req.param("id"))));
+// ── Auth endpoints ────────────────────────────────────────────────
+app.post("/auth/signup", async (c) => {
+  const { email, password } = await c.req.json<{ email?: string; password?: string }>();
+  try {
+    const user = auth.signup(String(email ?? ""), String(password ?? ""));
+    return c.json({ token: auth.issueToken(user.email), user: { email: user.email, admin: user.admin, creditsTokens: user.creditsTokens } }, 201);
+  } catch (err) {
+    if (err instanceof AuthError) return c.json({ error: err.message }, err.status as ContentfulStatusCode);
+    throw err;
+  }
+});
+
+app.post("/auth/login", async (c) => {
+  const { email, password } = await c.req.json<{ email?: string; password?: string }>();
+  try {
+    const user = auth.login(String(email ?? ""), String(password ?? ""));
+    return c.json({ token: auth.issueToken(user.email), user: { email: user.email, admin: user.admin, creditsTokens: user.creditsTokens } });
+  } catch (err) {
+    if (err instanceof AuthError) return c.json({ error: err.message }, err.status as ContentfulStatusCode);
+    throw err;
+  }
+});
+
+app.post("/auth/logout", (c) => {
+  auth.logout(c.req.header("authorization")?.replace(/^Bearer\s+/i, ""));
+  return c.json({ ok: true });
+});
+
+app.get("/auth/me", (c) => {
+  const user = c.get("user");
+  return c.json({ email: user.email, admin: user.admin, creditsTokens: user.creditsTokens });
+});
+
+app.get("/sessions", (c) => c.json({ sessions: ownedSessions(c.get("user")) }));
+app.get("/sessions/:id/stats", (c) => {
+  if (!canAccess(c.get("user"), c.req.param("id"))) return c.json({ error: "not found" }, 404);
+  return c.json(summarizeSession(workDir, c.req.param("id")));
+});
 
 // ── HTML pages ────────────────────────────────────────────────────
 
@@ -84,17 +194,32 @@ app.get("/", (c) => {
 });
 
 app.post("/sessions", async (c) => {
+  const user = c.get("user");
+  const noCredits = requireCredits(user);
+  if (noCredits) return c.json({ error: "out of credits" }, 402);
+
   const wantsJson = (c.req.header("content-type") ?? "").includes("application/json");
   let task: string;
+  let providerAlias: string | undefined;
   if (wantsJson) {
-    task = String((await c.req.json<{ task?: string }>()).task ?? "").trim();
+    const body = await c.req.json<{ task?: string; provider?: string }>();
+    task = String(body.task ?? "").trim();
+    providerAlias = body.provider;
   } else {
     const body = await c.req.parseBody();
     task = String(body.task ?? "").trim();
   }
   if (!task) return c.text("task required", 400);
 
-  const loop = new AgentLoop({ llm, tools, policy, bus, workDir });
+  // Per-session provider: any registered OpenAI-compatible backend, chosen at
+  // creation time. Falls back to the default provider when unset/unknown.
+  const sessionLlm =
+    providerAlias && registry.names().includes(providerAlias)
+      ? registry.get(providerAlias)
+      : llm;
+
+  const loop = new AgentLoop({ llm: sessionLlm, tools, policy, bus, workDir });
+  saveOwner(loop.sessionId, user.email);
   loop
     .run(fullstackAgent(), task, { autoApprove: false })
     .catch((err) => bus.publish(loop.sessionId, { type: "error", message: String(err), recoverable: false }));
@@ -104,6 +229,7 @@ app.post("/sessions", async (c) => {
 
 app.get("/sessions/:id", (c) => {
   const id = c.req.param("id");
+  if (!canAccess(c.get("user"), id)) return c.text("session not found", 404);
   const store = new Checkpointer(workDir, id);
   if (!existsSync(join(workDir, ".forge", "sessions", id, "events.jsonl"))) {
     return c.text("session not found", 404);
@@ -141,6 +267,7 @@ function sessionMain(sessionId: string, events: ReturnType<Checkpointer["events"
 app.get("/sessions/:id/events-stream", (c) => {
   const id = c.req.param("id");
   if (!id) return c.text("id required", 400);
+  if (!canAccess(c.get("user"), id)) return c.text("session not found", 404);
 
   return streamSSE(c, async (stream) => {
     const pendingCalls = new Map<string, ToolCall>();
@@ -183,6 +310,9 @@ app.get("/sessions/:id/events-stream", (c) => {
 
 app.post("/sessions/:id/messages", async (c) => {
   const id = c.req.param("id");
+  if (!canAccess(c.get("user"), id)) return c.text("session not found", 404);
+  const noCredits = requireCredits(c.get("user"));
+  if (noCredits) return c.json({ error: "out of credits" }, 402);
   let message: string;
   if ((c.req.header("content-type") ?? "").includes("application/json")) {
     message = String((await c.req.json<{ message?: string }>()).message ?? "").trim();
@@ -204,12 +334,14 @@ app.post("/sessions/:id/messages", async (c) => {
 
 app.post("/sessions/:id/approve/:callId", (c) => {
   const { id, callId } = c.req.param();
+  if (!canAccess(c.get("user"), id)) return c.text("session not found", 404);
   bus.submitApproval(id, callId, true, "ui approve");
   return c.body(null, 204);
 });
 
 app.post("/sessions/:id/deny/:callId", (c) => {
   const { id, callId } = c.req.param();
+  if (!canAccess(c.get("user"), id)) return c.text("session not found", 404);
   bus.submitApproval(id, callId, false, "ui deny");
   return c.body(null, 204);
 });
@@ -293,11 +425,13 @@ function evalCardFragment(score: ReturnType<typeof scoreToolCallMatch>): string 
 
 // ── Existing JSON endpoints (kept for API consumers) ──────────────
 app.get("/sessions/:id/events", (c) => {
+  if (!canAccess(c.get("user"), c.req.param("id"))) return c.json({ error: "not found" }, 404);
   const store = new Checkpointer(workDir, c.req.param("id"));
   return c.json({ events: store.events(), state: store.loadState() });
 });
 
 app.post("/sessions/:id/approve", async (c) => {
+  if (!canAccess(c.get("user"), c.req.param("id"))) return c.json({ error: "not found" }, 404);
   const { callId, approved, note } = await c.req.json<{ callId: string; approved: boolean; note?: string }>();
   bus.submitApproval(c.req.param("id"), callId, approved, note);
   return c.json({ ok: true });
@@ -309,7 +443,10 @@ app.get(
     const id = c.req.param("id");
     return {
       onOpen(_evt, ws) {
-        if (!id) return;
+        if (!id || !canAccess(c.get("user"), id)) {
+          ws.close(4404, "session not found");
+          return;
+        }
         const unsub = bus.subscribe(id, (ev) => ws.send(JSON.stringify(ev)));
         (ws as unknown as { __unsub?: () => void }).__unsub = unsub;
       },
