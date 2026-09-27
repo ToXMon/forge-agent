@@ -58,6 +58,12 @@ ${envLines || "      []"}
         as: 80
         to:
           - global: true
+        # Keep SSE/WebSocket connections alive through the provider ingress.
+        http_options:
+          max_body_size: 10485760
+          read_timeout: 360000
+          send_timeout: 360000
+          next_cases: ["error", "timeout", "502", "503", "504"]
 profiles:
   compute:
     ${spec.app}:
@@ -70,9 +76,16 @@ profiles:
           size: 1Gi
   placement:
     akash:
+      # Restrict bidding to verified Akash providers.
+      signedBy:
+        anyOf:
+          - "akash1365yvmc4s7awdyj3n2sav7xfx76adc6dnmlx63"
+      attributes:
+        host: akash
       pricing:
-        denom: uakt
-        amount: 1000
+        ${spec.app}:
+          denom: uakt
+          amount: 10000
 deployment:
   ${spec.app}:
     akash:

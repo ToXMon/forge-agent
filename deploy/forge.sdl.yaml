@@ -1,7 +1,8 @@
-# Akash SDL for the Forge server.
+# Akash SDL for the Forge server (validated against awesome-akash templates
+# and the SDL v2 reference).
 #
 # ⚠️ Everything in `env` is PUBLIC — SDL manifests are stored on-chain.
-#    Put placeholders here and inject real secrets at runtime, or use a
+#    Keep placeholders here and inject real secrets at runtime, or use a
 #    dedicated low-privilege API key for the deployment.
 #
 # Akash Console: paste this file at https://console.akash.network → Deploy.
@@ -10,7 +11,8 @@
 version: "2.0"
 services:
   forge:
-    image: ghcr.io/YOUR_GH_USERNAME/forge:latest   # ← publish your image, then set this
+    # Pin a concrete tag — providers refuse to re-pull `latest` on restart.
+    image: ghcr.io/YOUR_GH_USERNAME/forge:v0.1.0
     command:
       - "sh"
       - "-c"
@@ -26,6 +28,13 @@ services:
         as: 80
         to:
           - global: true
+        # Keep long-lived SSE/WebSocket connections from being cut by the
+        # provider's ingress.
+        http_options:
+          max_body_size: 10485760
+          read_timeout: 360000
+          send_timeout: 360000
+          next_cases: ["error", "timeout", "502", "503", "504"]
 profiles:
   compute:
     forge:
@@ -38,9 +47,16 @@ profiles:
           size: 1Gi
   placement:
     akash:
+      # Restrict bidding to verified Akash providers.
+      signedBy:
+        anyOf:
+          - "akash1365yvmc4s7awdyj3n2sav7xfx76adc6dnmlx63"
+      attributes:
+        host: akash
       pricing:
-        denom: uakt
-        amount: 1000
+        forge:
+          denom: uakt
+          amount: 10000   # upper bound — you pay the winning (lower) bid
 deployment:
   forge:
     akash:
