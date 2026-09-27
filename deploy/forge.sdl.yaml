@@ -1,0 +1,48 @@
+# Akash SDL for the Forge server.
+#
+# ⚠️ Everything in `env` is PUBLIC — SDL manifests are stored on-chain.
+#    Put placeholders here and inject real secrets at runtime, or use a
+#    dedicated low-privilege API key for the deployment.
+#
+# Akash Console: paste this file at https://console.akash.network → Deploy.
+# CLI: bash deploy/akash-deploy.sh (after funding a wallet + installing the CLI).
+---
+version: "2.0"
+services:
+  forge:
+    image: ghcr.io/YOUR_GH_USERNAME/forge:latest   # ← publish your image, then set this
+    command:
+      - "sh"
+      - "-c"
+      - "node dist/src/server/index.js"
+    env:
+      - FORGE_BASE_URL=https://openrouter.ai/api/v1
+      - FORGE_API_KEY=sk-or-REPLACE-ME
+      - FORGE_MODEL=deepseek/deepseek-chat-v3-0324
+      - FORGE_PORT=8787
+      # - FORGE_TELEGRAM_BOT_TOKEN=123:abc   # only if you want the Telegram channel
+    expose:
+      - port: 8787
+        as: 80
+        to:
+          - global: true
+profiles:
+  compute:
+    forge:
+      resources:
+        cpu:
+          units: 1
+        memory:
+          size: 1Gi
+        storage:
+          size: 1Gi
+  placement:
+    akash:
+      pricing:
+        denom: uakt
+        amount: 1000
+deployment:
+  forge:
+    akash:
+      profile: forge
+      count: 1

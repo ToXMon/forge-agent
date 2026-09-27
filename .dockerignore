@@ -1,0 +1,9 @@
+node_modules
+dist
+.git
+.github
+evals/.last-results.json
+.forge
+.env
+*.log
+.DS_Store
