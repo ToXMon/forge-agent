@@ -18,6 +18,7 @@ import { Checkpointer } from "../harness/checkpoint.js";
 import { summarizeSession } from "../harness/stats.js";
 import { startTelegramChannel } from "../channels/telegram.js";
 import { AuthStore, AuthError, type User } from "../auth/auth.js";
+import { startScan, getScan } from "../scan/scanner.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { loadSkills } from "../skills/loader.js";
 import { GOLDEN_TASKS } from "../../evals/golden/tasks.js";
@@ -85,7 +86,7 @@ const creditHandler = ({ sessionId, event }: GlobalEventPayload) => {
 };
 bus.on("event", creditHandler);
 
-const PUBLIC_PATHS = [/^\/health$/, /^\/auth\/(signup|login)$/];
+const PUBLIC_PATHS = [/^\/health$/, /^\/auth\/(signup|login)$/, /^\/scan(\/|$)/];
 app.use("*", async (c, next) => {
   if (PUBLIC_PATHS.some((re) => re.test(c.req.path))) return next();
   // Bearer header for REST; ?token= for the WebSocket (browsers can't set
@@ -131,6 +132,65 @@ app.use(
 
 // ── Health + existing JSON API (unchanged) ────────────────────────
 app.get("/health", (c) => c.json({ ok: true, model: llm.model, providers: registry.names() }));
+// ── Public Gauntlet scanner (the wedge: "does your AI app actually run?") ──
+
+app.post("/scan", async (c) => {
+  const { repoUrl } = await c.req.json<{ repoUrl?: string }>();
+  if (!repoUrl) return c.json({ error: "repoUrl required" }, 400);
+  const scan = startScan(workDir, repoUrl);
+  return c.json(scan, 202);
+});
+
+app.get("/scan/:id", (c) => {
+  const scan = getScan(workDir, c.req.param("id"));
+  if (!scan) return c.json({ error: "not found" }, 404);
+  return c.json(scan);
+});
+
+function escapeHtml2(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+app.get("/scan/:id/report", (c) => {
+  const scan = getScan(workDir, c.req.param("id"));
+  if (!scan) return c.text("scan not found", 404);
+  const labels: Array<[string, boolean]> = [
+    ["Repo cloned", scan.checks.cloned],
+    ["Dependencies installed", scan.checks.depsInstalled],
+    ["Server booted", scan.checks.serverBooted],
+    ["HTTP responds", scan.checks.httpOk],
+  ];
+  const verdict = scan.status === "running"
+    ? "⏳ Scanning…"
+    : scan.score >= 3
+      ? `✅ VERIFIED — Gauntlet ${scan.score}/4`
+      : `❌ FAILED — Gauntlet ${scan.score}/4`;
+  const color = scan.score >= 3 ? "#10b981" : scan.status === "running" ? "#f59e0b" : "#ef4444";
+  const rows = labels
+    .map(([label, ok]) => `<tr><td>${ok ? "✅" : "❌"} ${escapeHtml2(label)}</td></tr>`)
+    .join("");
+  const page = `<!doctype html><html><head><meta charset="utf-8"><title>Gauntlet Report — ${escapeHtml2(scan.repoUrl)}</title>
+<meta property="og:title" content="${verdict} — Forge Gauntlet">
+<meta property="og:description" content="Machine-verified scan of ${escapeHtml2(scan.repoUrl)}">
+<style>body{background:#09090b;color:#e4e4e7;font-family:ui-sans-serif,system-ui;display:flex;justify-content:center;padding:48px 16px}
+.card{max-width:560px;width:100%;border:1px solid #27272a;border-radius:16px;padding:32px;background:#18181b}
+h1{font-size:18px;margin:0 0 4px}.muted{color:#a1a1aa;font-size:13px;word-break:break-all}
+.verdict{font-size:24px;font-weight:700;margin:24px 0;color:${color}}
+table{width:100%;border-collapse:collapse;font-size:14px}td{padding:8px 0;border-top:1px solid #27272a}
+.brand{margin-top:24px;font-size:13px;color:#f97316}a{color:#f97316}
+pre{background:#09090b;padding:12px;border-radius:8px;font-size:11px;max-height:200px;overflow:auto;color:#a1a1aa}</style></head>
+<body><div class="card">
+<h1>⚒ Forge Gauntlet</h1>
+<p class="muted">${escapeHtml2(scan.repoUrl)}</p>
+<div class="verdict">${verdict}</div>
+<table>${rows}</table>
+${scan.details.error ? `<p class="muted" style="margin-top:16px">Error: ${escapeHtml2(scan.details.error)}</p>` : ""}
+${scan.details.bodyPreview ? `<pre>${escapeHtml2(scan.details.bodyPreview)}</pre>` : ""}
+<p class="brand">Machine-verified by <a href="/">Forge — Ship With Receipts</a></p>
+</div></body></html>`;
+  return c.html(page);
+});
+
 // ── Auth endpoints ────────────────────────────────────────────────
 app.post("/auth/signup", async (c) => {
   const { email, password } = await c.req.json<{ email?: string; password?: string }>();
