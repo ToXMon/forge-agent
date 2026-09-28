@@ -159,25 +159,36 @@ export default function Home() {
       const { BrowserPod } = await import("@leaningtech/browserpod");
       const pod = await BrowserPod.boot({ apiKey: cfg.browserpod.apiKey, nodeVersion: cfg.browserpod.nodeVersion });
 
-      pod.onPortal(({ url }: { url: string }) => setPortalUrl(url));
+      let portal: string | null = null;
+      pod.onPortal(({ url }: { url: string }) => {
+        portal = url;
+        setPortalUrl(url);
+      });
       const logs: string[] = [];
+      const decoder = new TextDecoder();
       const terminal = await pod.createCustomTerminal({
-        onOutput: (buf: ArrayBuffer) => logs.push(new TextDecoder().decode(buf)),
+        // BrowserPod hands us a resizable ArrayBuffer, which TextDecoder
+        // rejects — copy into a fresh view first.
+        onOutput: (buf: ArrayBuffer) => logs.push(decoder.decode(new Uint8Array(buf.slice(0)))),
       });
 
-      // Push the workspace into the pod's filesystem.
+      // Push the workspace into the pod's filesystem (BrowserPod needs
+      // absolute paths).
       const workspaceFiles = await forge.workspaceFiles(active);
       for (const f of workspaceFiles) {
         if (f.size > 512 * 1024) continue;
-        const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
-        if (dir) await pod.createDirectory(dir, { recursive: true });
-        const fh = await pod.createFile(f.path, "w");
+        const podPath = `/${f.path}`;
+        const dir = podPath.includes("/") ? podPath.slice(0, podPath.lastIndexOf("/")) : "";
+        if (dir && dir !== "/") await pod.createDirectory(dir, { recursive: true });
+        const fh = await pod.createFile(podPath, "utf-8");
         const { content } = await forge.fileContent(active, f.path);
         await (fh as import("@leaningtech/browserpod").TextFile).write(content);
         await fh.close();
       }
 
       // Boot the app: package.json start script, else node server.js.
+      // NOTE: pod.run never resolves for a long-running server — don't await
+      // it; wait for the portal instead.
       const pkg = workspaceFiles.find((f) => f.path === "package.json");
       let startCmd = "node server.js";
       if (pkg) {
@@ -185,14 +196,20 @@ export default function Home() {
         const scripts = JSON.parse(content).scripts as Record<string, string> | undefined;
         if (scripts?.start) startCmd = scripts.start;
       }
-      await pod.run("sh", ["-c", startCmd], { terminal });
+      // run() returns a Process, not a promise — normalize for error handling.
+      Promise.resolve(pod.run("sh", ["-c", startCmd], { terminal, cwd: "/" })).catch((e: unknown) => {
+        logs.push(`\n[run error] ${e instanceof Error ? e.message : String(e)}`);
+      });
 
-      // Give the portal a moment, then report the result into the session.
-      await new Promise((r) => setTimeout(r, 8000));
+      // Wait up to 30s for the portal, then report the result into the session.
+      const deadline = Date.now() + 30_000;
+      while (!portal && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
       const tail = logs.join("").slice(-800);
       void forge.sendMessage(
         active,
-        `BrowserPod verification: app booted in the browser sandbox.${portalUrl ? ` Portal: ${portalUrl}` : " No portal yet (is a server listening?)"}\nConsole tail:\n${tail || "(no output)"}`,
+        `BrowserPod verification: app booted in the browser sandbox.${portal ? ` Portal: ${portal}` : " No portal after 30s (is a server listening on a port?)"}\nConsole tail:\n${tail || "(no output)"}`,
       );
     } catch (err) {
       setVerifyError(err instanceof Error ? err.message : String(err));

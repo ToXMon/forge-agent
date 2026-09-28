@@ -7,6 +7,20 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname,
   },
+  // BrowserPod's Wasm runtime needs SharedArrayBuffer, which Chrome only
+  // exposes on cross-origin-isolated pages. credentialless keeps cross-origin
+  // loads (rt.browserpod.io) working without CORP headers on them.
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: [
+          { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+          { key: "Cross-Origin-Embedder-Policy", value: "credentialless" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
