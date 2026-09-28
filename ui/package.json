@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.121",
+    "@leaningtech/browserpod": "^3.2.0",
     "@next/swc-darwin-arm64": "^16.3.6",
     "ai": "^7.0.118",
     "next": "16.3.6",

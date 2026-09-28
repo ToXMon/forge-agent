@@ -43,6 +43,9 @@ export class AgentLoop {
       policy: PolicyGuard;
       bus: HarnessBus;
       workDir: string;
+      /** Directory the agent's tools operate in — defaults to workDir.
+       *  Per-session workspaces keep generated artifacts isolated. */
+      workspaceDir?: string;
       sessionId?: string;
     },
   ) {
@@ -53,6 +56,10 @@ export class AgentLoop {
 
   get sessionId(): string {
     return this.store.sessionId;
+  }
+
+  private makeCtx(): ToolContext {
+    return { workDir: this.deps.workspaceDir ?? this.deps.workDir, session: {} };
   }
 
   private emit(event: HarnessEvent): void {
@@ -100,7 +107,7 @@ export class AgentLoop {
     state = { ...state, status: "running" };
     this.saveState(state);
 
-    const ctx: ToolContext = { workDir: this.deps.workDir, session: {} };
+    const ctx = this.makeCtx();
 
     for (let step = 0; step < maxSteps; step++) {
       state = await this.hydrator.maybeCompact(state);
@@ -191,7 +198,7 @@ export class AgentLoop {
     if (!call) return { ...state, status: "running" };
     if (opts.autoApprove) {
       this.emit({ type: "approval_decided", callId: call.id, approved: true, note: "auto-approved (yolo)" });
-      const ctx: ToolContext = { workDir: this.deps.workDir, session: {} };
+      const ctx = this.makeCtx();
       const result = await this.executeTool(call, ctx);
       this.emit({ type: "tool_result", result });
       const next = { ...state, status: "running" as const, pendingApproval: null };
@@ -202,7 +209,7 @@ export class AgentLoop {
     const verdict = await this.deps.bus.awaitApproval(this.sessionId, call.id);
     this.emit({ type: "approval_decided", callId: call.id, approved: verdict.approved, note: verdict.note });
     if (verdict.approved) {
-      const ctx: ToolContext = { workDir: this.deps.workDir, session: {} };
+      const ctx = this.makeCtx();
       const result = await this.executeTool(call, ctx);
       this.emit({ type: "tool_result", result });
     } else {

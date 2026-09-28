@@ -1,18 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  forge,
-  clearToken,
-  getToken,
-  setToken,
-  streamSession,
-  toolLabel,
-  type HarnessEvent,
-  type Me,
-  type SessionStats,
-  type ToolCall,
-} from "@/lib/forge";
+import { forge, clearToken, getToken, setToken, streamSession, toolLabel, type HarnessEvent, type Me, type SessionStats, type ToolCall, type WorkspaceFile } from "@/lib/forge";
 
 interface ChatItem {
   key: string;
@@ -62,6 +51,11 @@ export default function Home() {
   const [model, setModel] = useState<string>("…");
   const [input, setInput] = useState("");
   const [starting, setStarting] = useState(false);
+  const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
+  const [verifying, setVerifying] = useState(false);
+  const [portalUrl, setPortalUrl] = useState<string | null>(null);
+  const [verifyError, setVerifyError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const statsTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -101,9 +95,16 @@ export default function Home() {
       .then((r) => alive && setItems(buildItems(r.events)))
       .catch(() => alive && setItems([]));
     refreshStats(active);
+    forge.workspaceFiles(active).then(setFiles).catch(() => setFiles([]));
+    setPortalUrl(null);
+    setVerifyError(null);
 
     const stop = streamSession(active, (ev) => {
       setItems((prev) => appendEvent(prev, ev));
+      if (ev.type === "tool_result") {
+        // Artifacts may have changed — refresh the workspace listing lazily.
+        setTimeout(() => forge.workspaceFiles(active).then(setFiles).catch(() => {}), 1500);
+      }
       if (ev.type === "done" || ev.type === "error" || ev.type === "llm_usage") refreshStats(active);
     });
     // Poll stats lightly so token counters tick while the agent runs.
@@ -148,6 +149,58 @@ export default function Home() {
     refreshStats(active);
   };
 
+  const verifyInBrowser = async () => {
+    if (!active || verifying) return;
+    setVerifying(true);
+    setVerifyError(null);
+    try {
+      const cfg = await forge.config();
+      if (!cfg.browserpod) throw new Error("BROWSERPOD_API_KEY not configured on the server");
+      const { BrowserPod } = await import("@leaningtech/browserpod");
+      const pod = await BrowserPod.boot({ apiKey: cfg.browserpod.apiKey, nodeVersion: cfg.browserpod.nodeVersion });
+
+      pod.onPortal(({ url }: { url: string }) => setPortalUrl(url));
+      const logs: string[] = [];
+      const terminal = await pod.createCustomTerminal({
+        onOutput: (buf: ArrayBuffer) => logs.push(new TextDecoder().decode(buf)),
+      });
+
+      // Push the workspace into the pod's filesystem.
+      const workspaceFiles = await forge.workspaceFiles(active);
+      for (const f of workspaceFiles) {
+        if (f.size > 512 * 1024) continue;
+        const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
+        if (dir) await pod.createDirectory(dir, { recursive: true });
+        const fh = await pod.createFile(f.path, "w");
+        const { content } = await forge.fileContent(active, f.path);
+        await (fh as import("@leaningtech/browserpod").TextFile).write(content);
+        await fh.close();
+      }
+
+      // Boot the app: package.json start script, else node server.js.
+      const pkg = workspaceFiles.find((f) => f.path === "package.json");
+      let startCmd = "node server.js";
+      if (pkg) {
+        const { content } = await forge.fileContent(active, "package.json");
+        const scripts = JSON.parse(content).scripts as Record<string, string> | undefined;
+        if (scripts?.start) startCmd = scripts.start;
+      }
+      await pod.run("sh", ["-c", startCmd], { terminal });
+
+      // Give the portal a moment, then report the result into the session.
+      await new Promise((r) => setTimeout(r, 8000));
+      const tail = logs.join("").slice(-800);
+      void forge.sendMessage(
+        active,
+        `BrowserPod verification: app booted in the browser sandbox.${portalUrl ? ` Portal: ${portalUrl}` : " No portal yet (is a server listening?)"}\nConsole tail:\n${tail || "(no output)"}`,
+      );
+    } catch (err) {
+      setVerifyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVerifying(false);
+    }
+  };
+
   const statsInfo = useMemo(() => {
     if (!stats) return null;
     const t = stats.tokens;
@@ -189,6 +242,35 @@ export default function Home() {
           <div className="truncate">{model}</div>
           {stats?.status && <div>status: {stats.status}</div>}
         </div>
+        {active && (
+          <div className="max-h-56 overflow-y-auto border-t border-zinc-800 px-4 py-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-medium text-zinc-400">workspace ({files.length})</span>
+              <button
+                onClick={() => void verifyInBrowser()}
+                disabled={verifying || files.length === 0}
+                className="rounded-md border border-emerald-700 px-2 py-1 text-[10px] text-emerald-400 hover:bg-emerald-900/40 disabled:opacity-40"
+              >
+                {verifying ? "booting…" : "▶ verify in browser"}
+              </button>
+            </div>
+            {portalUrl && (
+              <a href={portalUrl} target="_blank" rel="noreferrer" className="mb-2 block truncate text-[11px] text-emerald-400 underline">
+                🌐 {portalUrl}
+              </a>
+            )}
+            {verifyError && <p className="mb-2 text-[10px] text-red-400">{verifyError}</p>}
+            {files.map((f) => (
+              <button
+                key={f.path}
+                onClick={() => forge.fileContent(active, f.path).then(setPreview).catch(() => {})}
+                className="block w-full truncate rounded px-1 py-0.5 text-left text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                {f.path} <span className="text-zinc-700">{f.size > 1024 ? `${(f.size / 1024).toFixed(1)}k` : `${f.size}b`}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </aside>
 
       {/* Main */}
@@ -261,6 +343,17 @@ export default function Home() {
           </div>
         </div>
       </main>
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-8" onClick={() => setPreview(null)}>
+          <div className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-zinc-800 bg-zinc-900" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+              <span className="font-mono text-xs text-zinc-300">{preview.path}</span>
+              <button onClick={() => setPreview(null)} className="text-xs text-zinc-500 hover:text-zinc-300">✕</button>
+            </div>
+            <pre className="flex-1 overflow-auto p-4 text-xs text-zinc-400">{preview.content}</pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

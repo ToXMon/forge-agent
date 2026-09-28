@@ -4,7 +4,8 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { streamSSE } from "hono/streaming";
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ProviderRegistry } from "../harness/providers.js";
@@ -17,7 +18,7 @@ import { Checkpointer } from "../harness/checkpoint.js";
 import { summarizeSession } from "../harness/stats.js";
 import { startTelegramChannel } from "../channels/telegram.js";
 import { AuthStore, AuthError, type User } from "../auth/auth.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { loadSkills } from "../skills/loader.js";
 import { GOLDEN_TASKS } from "../../evals/golden/tasks.js";
 import { scoreToolCallMatch } from "../../evals/scorers/toolCallMatch.js";
@@ -164,6 +165,66 @@ app.get("/auth/me", (c) => {
 });
 
 app.get("/sessions", (c) => c.json({ sessions: ownedSessions(c.get("user")) }));
+/** Per-session workspace: the agent's tools are scoped here; artifacts land here. */
+function workspaceFor(sessionId: string): string {
+  const dir = join(workDir, "workspaces", sessionId);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/** Recursive file listing, skipping noise. Returns relative paths + sizes. */
+function listWorkspaceFiles(root: string, prefix = ""): Array<{ path: string; size: number }> {
+  const SKIP = new Set(["node_modules", ".git", "dist", ".next", "__pycache__"]);
+  let out: Array<{ path: string; size: number }> = [];
+  let entries: Array<import("node:fs").Dirent>;
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (SKIP.has(e.name)) continue;
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) out = out.concat(listWorkspaceFiles(join(root, e.name), rel));
+    else if (e.isFile()) {
+      try {
+        out.push({ path: rel, size: statSync(join(root, e.name)).size });
+      } catch {
+        /* raced deletion */
+      }
+    }
+    if (out.length >= 500) return out;
+  }
+  return out;
+}
+
+app.get("/sessions/:id/files", (c) => {
+  if (!canAccess(c.get("user"), c.req.param("id"))) return c.json({ error: "not found" }, 404);
+  return c.json({ files: listWorkspaceFiles(workspaceFor(c.req.param("id"))) });
+});
+
+app.get("/sessions/:id/files/*", (c) => {
+  if (!canAccess(c.get("user"), c.req.param("id"))) return c.json({ error: "not found" }, 404);
+  // Path traversal guard: resolve and require the result to stay in the workspace.
+  const root = workspaceFor(c.req.param("id"));
+  const rel = c.req.path.replace(/^\/sessions\/[^/]+\/files\/?/, "");
+  const abs = resolve(root, rel);
+  if (!abs.startsWith(resolve(root))) return c.json({ error: "forbidden" }, 403);
+  try {
+    const content = readFileSync(abs, "utf8");
+    return c.json({ path: rel, content: content.slice(0, 256 * 1024) });
+  } catch {
+    return c.json({ error: "not found" }, 404);
+  }
+});
+
+// Client-side config the UI needs (BrowserPod in-browser verification).
+app.get("/config", (c) => {
+  return c.json({
+    browserpod: process.env.BROWSERPOD_API_KEY ? { apiKey: process.env.BROWSERPOD_API_KEY, nodeVersion: "22" } : null,
+  });
+});
+
 app.get("/sessions/:id/stats", (c) => {
   if (!canAccess(c.get("user"), c.req.param("id"))) return c.json({ error: "not found" }, 404);
   return c.json(summarizeSession(workDir, c.req.param("id")));
@@ -218,7 +279,12 @@ app.post("/sessions", async (c) => {
       ? registry.get(providerAlias)
       : llm;
 
-  const loop = new AgentLoop({ llm: sessionLlm, tools, policy, bus, workDir });
+  // Workspace is derived from a pre-generated session id (needed before the
+  // loop exists so the loop can be constructed with it).
+  const sessionId = randomUUID();
+  mkdirSync(join(workDir, "workspaces", sessionId), { recursive: true });
+
+  const loop = new AgentLoop({ llm: sessionLlm, tools, policy, bus, workDir, sessionId, workspaceDir: join(workDir, "workspaces", sessionId) });
   saveOwner(loop.sessionId, user.email);
   loop
     .run(fullstackAgent(), task, { autoApprove: false })

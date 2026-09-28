@@ -48,6 +48,11 @@ export interface SessionStats {
   lastError: string | null;
 }
 
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${FORGE_API}${path}`, {
     ...init,
@@ -71,6 +76,10 @@ export const forge = {
   sessionEvents: (id: string) =>
     json<{ events: HarnessEvent[]; state: { status: string } | null }>(`/sessions/${id}/events`),
   sessionStats: (id: string) => json<SessionStats>(`/sessions/${id}/stats`),
+  workspaceFiles: (id: string) => json<{ files: WorkspaceFile[] }>(`/sessions/${id}/files`).then((r) => r.files),
+  fileContent: (id: string, path: string) =>
+    json<{ path: string; content: string }>(`/sessions/${id}/files/${path}`),
+  config: () => json<{ browserpod: { apiKey: string; nodeVersion: string } | null }>("/config"),
   health: () => json<{ ok: boolean; model: string; providers: string[] }>("/health"),
   newSession: (task: string) =>
     json<{ sessionId: string }>("/sessions", { method: "POST", body: JSON.stringify({ task }) }),
