@@ -70,3 +70,18 @@
 
 ---
 *Saved to Ideabrowser project `cadf06b0` alongside attached trend + market insight. Deep research report will land at the idea URL when complete (~25 min).*
+
+---
+
+## ⚡ UPDATE (2026-09-28, later): Ideabrowser deep-research verdict — PIVOT (medium confidence)
+
+The agent-researched, source-receipted report came back with corrections that change the GTM:
+
+1. **The buyer is NOT the non-technical founder.** Founders don't search for hosting and can't judge "provably correct." The buyer is the **freelance rescuer and small agency** already charging $500–1K to fix broken Lovable apps — we make them 10× faster with receipts.
+2. **Akash is hidden plumbing, never a feature.** Nobody buys "decentralized cloud"; they buy "a bill you can predict."
+3. **Revised ladder:** free public "deployment audit" scanner (drop into r/vibecoding rescue threads — not SEO) → **$299 Fix Pack** (we fix the app + verified deploy) → **$49/mo managed hosting with receipts**.
+4. **⚠️ The window closes inside 12 months:** Lovable's $330M Series B explicitly names hosting as a use of proceeds. Move now.
+
+**Distribution correction:** the first 100 customers come from rescue threads and community teardowns, not search. "Nobody searches for this" — the insight data's LOW-competition keywords are content plays, not acquisition.
+
+**What survives unchanged:** the Gauntlet/scanner tech (it IS the product), per-session workspaces, verification receipts as the moat, open-weight LLM cost floor. What changes: who we sell to, the price ladder, and the urgency.
